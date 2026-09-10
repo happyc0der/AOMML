@@ -1,0 +1,8 @@
+# Development dependencies: tests, linting, and notebook execution.
+-r requirements.txt
+
+pytest>=8.0           # verified with 9.1.1
+ruff>=0.6             # verified with 0.16.7
+jupyter>=1.0          # verified with 1.1.1
+nbconvert>=7.0        # verified with 7.17.1
+ipykernel>=6.29       # verified with 7.3.0

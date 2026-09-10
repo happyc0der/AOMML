@@ -1,0 +1,12 @@
+# Runtime dependencies. Prefer `uv sync` (uses uv.lock for exact pins);
+# this file is the pip fallback.
+#
+# Requires Python 3.12.
+# Versions below are the minimums; the versions this project was verified
+# against are noted alongside.
+
+torch>=2.4            # verified with 2.14.0
+numpy>=1.26           # verified with 2.5.3
+scikit-learn>=1.4     # verified with 1.9.1  (reference solver for the LASSO tests)
+pandas>=2.2           # verified with 3.0.5
+matplotlib>=3.8       # verified with 3.11.1

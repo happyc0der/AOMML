@@ -1,139 +1,109 @@
 # AOMML — Stochastic Subgradient Descent, with and without Momentum
 
 Course project implementing **stochastic subgradient descent (SSGD)** and **SSGD with heavy-ball
-momentum**, applied to two non-smooth problems: **LASSO regression** and a **multi-layer ReLU
-network**. Each is studied on synthetic data with known ground truth, then on real data
-(California housing, MNIST).
+momentum** from the ground up, applied to two genuinely non-smooth problems: **LASSO regression**
+(the $\ell_1$ penalty is non-differentiable at zero) and a **multi-layer ReLU network** (the ReLU
+kink). Each is studied on synthetic data with a known ground truth, then on real data.
 
-## Quickstart
+## Requirements
+
+- **Python 3.12**
+- macOS/Linux/Windows. Runs on CPU; uses Apple MPS automatically when available.
+- No network needed — MNIST and the California housing cache are committed.
+
+## Running
 
 ```bash
-uv sync --group dev
-uv run pytest                 # 87 tests
-uv run ruff check .           # lint
+uv sync --group dev        # recommended: exact pins from uv.lock
+uv run pytest              # 89 tests, ~9s
 uv run jupyter lab Project.ipynb
 ```
 
-To re-execute the notebook end to end:
+Without `uv`:
+
+```bash
+python3.12 -m venv .venv && source .venv/bin/activate
+pip install -r requirements-dev.txt
+pip install -e .
+pytest
+```
+
+Re-execute the notebook end to end (~3 min):
 
 ```bash
 uv run jupyter nbconvert --execute --to notebook --inplace Project.ipynb
 ```
+
+## What was done
+
+The repository previously held a single 7-cell notebook that stated an intent and stopped — no
+optimizer, no objective, no network, no training loop, no evaluation. The cells that did exist had
+nine defects, two of them fatal: `.cuda()` was hardcoded (a crash on any non-NVIDIA machine), and
+the Boston housing fetch returns **HTTP 403** today, so the notebook could not run at all.
+
+Built from that starting point:
+
+- **`optimizers.py`** — `SSGD` and `SSGDMomentum` as real `torch.optim.Optimizer` subclasses, with
+  `constant` / `inv_sqrt` / `inv` step schedules, optional Nesterov, and both the buffer and
+  Polyak difference formulations of momentum.
+- **`objectives.py`** — LASSO with an unpenalised intercept, plus a closed-form analytic
+  subgradient kept purely as a test oracle against autograd.
+- **`train.py`** — training loop tracking the raw, running-best and Polyak-averaged iterates
+  separately, because the subgradient method is *not* a descent method.
+- **`data.py`, `models.py`, `utils.py`** — synthetic sparse regression with known `w_true`, an IDX
+  reader (replacing the undeclared `idx2numpy`), shuffled splits, seeding, device selection, scaling.
+- **89 tests** and a **CI** workflow (lint, format, tests, full notebook execution).
+
+Fixed along the way: hardcoded `.cuda()`, unused device variable, `torch` never seeded, no feature
+standardization, no intercept, labels cast to `float32`, unnormalized `uint8` images, the dead
+Boston URL, and the undeclared dependency. Each has a regression test in `tests/test_regressions.py`.
+
+## What was achieved
+
+Correctness is anchored to **external references**, not to loss curves looking plausible:
+
+| Check | Result |
+|---|---|
+| Autograd vs. closed-form subgradient | agrees to `4e-16` |
+| Subgradient at the non-smooth point `w=0` | verified valid in $[-\lambda,\lambda]$, all coordinates |
+| LASSO optimum vs. scikit-learn | gap `7.4e-5`, coefficients within `1.5e-3` |
+| Support recovery | true support recovered at 10/10 tested $\lambda$ |
+| Update rules | each recurrence matched step-by-step, and against `torch.optim.SGD` to `1e-14` |
+| MNIST (784→128→10, 5 epochs) | 91.4% test (SSGD), 92.7% (momentum), selected on a held-out validation split |
+
+Three results worth stating:
+
+1. **The subgradient method is not a descent method.** $f(w_k)$ rose on **44%** of iterations while
+   converging normally. Plotting only the raw iterate makes a correct implementation look broken.
+2. **A constant step does not converge.** It reaches a neighbourhood of $f^\star$ and stops:
+   quadrupling the budget changed its gap by less than $10^{-6}$ relative (`5.4616` → `5.4616`),
+   while $\alpha_0/\sqrt{k+1}$ kept descending.
+3. **Momentum's benefit is stability, not a better step.** Comparing $\beta$ at fixed $\alpha_0$
+   suggests a `9.3e8×` speedup — but that silently varies the effective step $\alpha_0/(1-\beta)$.
+   With the effective step *matched*, the advantage collapses to `1.05×`. What momentum actually
+   buys is headroom: plain SSGD diverges above an effective step of `1.5`, while $\beta=0.99$
+   stays stable to `300`. That is the $\kappa \to \sqrt{\kappa}$ result as a mechanism rather than
+   a slogan.
 
 ## Layout
 
 ```
-src/aomml/
-  optimizers.py   SSGD and SSGDMomentum as torch.optim.Optimizer subclasses
-  objectives.py   LASSO objective + closed-form analytic subgradient (test oracle)
-  train.py        training loop; tracks raw, best and Polyak-averaged iterates
-  data.py         synthetic sparse regression, IDX reader, California housing
-  models.py       LinearModel, ReLUMLP
-  utils.py        seeding, device selection, Standardizer
-tests/            87 tests — see "Verification" below
-Project.ipynb     experimental narrative (E1–E7)
-data/             MNIST IDX files, cached California housing
+src/aomml/      optimizers, objectives, models, training loop, data, utils
+tests/          89 tests: math, update rules, convergence, defect regressions
+tools/          build_notebook.py — regenerates Project.ipynb
+Project.ipynb   experimental narrative (E1–E7)
+data/           MNIST IDX files, cached California housing
 ```
 
-## Method
+## Known limitation
 
-$$w_{k+1} = w_k - \alpha_k g_k, \qquad g_k \in \partial f_{i_k}(w_k)$$
+Plain subgradient descent does **not** produce exact zeros — coefficients approach zero without
+landing on it (0 of 50 exactly zero, against scikit-learn's 45), so support recovery requires
+thresholding. Proximal methods (ISTA/FISTA) apply a soft-threshold and do give exact sparsity;
+adding one is the natural extension of this work.
 
-with momentum $v_{k+1} = \beta v_k + g_k$, $w_{k+1} = w_k - \alpha_k v_{k+1}$, and step-size
-schedules `constant`, `inv_sqrt` ($\alpha_0/\sqrt{k+1}$, the default) and `inv` ($\alpha_0/(k+1)$).
+## Note on the dataset
 
-Three design points are worth knowing before reading the code:
-
-- **The subgradient method is not a descent method.** $f(w_k)$ is non-monotone; the guarantees are
-  for $\min_{j\le k} f(w_j)$ and the averaged iterate. `History` tracks all three, which is why a
-  correct run can *look* unstable if you plot only the raw iterate.
-- **Constant steps do not converge**, they reach a neighbourhood of $f^\star$ and hover.
-  Convergence needs $\alpha_k\to 0$ with $\sum\alpha_k=\infty$.
-- **Two momentum formulations.** The buffer form ($v\leftarrow\beta v+g$) and Polyak's difference
-  form ($w\leftarrow w-\alpha g+\beta(w_k-w_{k-1})$) are identical at constant step but diverge
-  once $\alpha_k$ decays. Both are implemented (`variant="buffer"` / `"difference"`).
-
-## Verification
-
-Correctness is asserted against **external references**, not by inspecting loss curves:
-
-| Check | Evidence |
-|---|---|
-| Objective and gradients | autograd matches the closed-form subgradient to $10^{-12}$ |
-| Non-smooth point $w=0$ | returned $g$ verified to lie in the subdifferential $[-\lambda,\lambda]$ |
-| Optimizer solves LASSO | reaches scikit-learn's optimum within $10^{-3}$; coefficients within $10^{-2}$ |
-| Support recovery | true support of the synthetic problem fully recovered |
-| Step-size theory | constant step provably stalls (4× budget → no improvement); $1/\sqrt{k}$ keeps descending |
-| Momentum | see the note below — the naive comparison overstates it by 8 orders of magnitude |
-| Network wiring | MLP drives loss to ~0 on 32 samples |
-| Update rules | each recurrence checked step-by-step against hand-computed values |
-
-`tests/test_regressions.py` additionally guards every defect listed below, so a regression
-reintroduces a failing test rather than a silent behaviour change.
-
-### The momentum result, stated carefully
-
-Comparing $\beta$ values at a fixed $\alpha_0$ is not a controlled experiment. The momentum buffer
-accumulates to $v \approx g/(1-\beta)$, so the *effective* step is $\alpha_0/(1-\beta)$ — at
-$\beta = 0.99$ that is a step $100\times$ larger than at $\beta = 0$. Running it both ways on
-$\kappa(X) = 200$:
-
-| | $\beta = 0$ | $\beta = 0.99$ | apparent speedup |
-|---|---|---|---|
-| fixed $\alpha_0 = 1$ | 2.29e-4 | 2.46e-13 | **9.3e8×** |
-| effective step matched to 1 | 2.29e-4 | 2.18e-4 | **1.05×** |
-
-At a matched step, momentum buys essentially nothing per iteration. What it does buy is
-**stability**: plain SSGD diverges above an effective step of 1.5, while $\beta = 0.99$ remains
-stable to an effective step of 300. That is the real mechanism — heavy-ball improves the
-condition-number dependence from $\kappa$ to $\sqrt{\kappa}$ by enabling a larger stable step, not
-by making each step individually smarter. E4 in the notebook runs both arms and the stability sweep.
-
-### Evaluation hygiene
-
-MNIST uses a 54k/6k/10k train/validation/test split; the optimiser is selected on validation
-accuracy and the test set is read once. Splits go through `data.train_test_split`, which shuffles —
-California housing is stored in geographic order, so a slice split shifts mean latitude by ~1.9°
-between halves and silently evaluates on a different population than it trained on.
-
-## What was wrong with the original notebook
-
-The repository previously contained a 7-cell notebook that stated an intent and stopped: no
-optimizer, no LASSO objective, no network, no training loop, no evaluation. The cells that did
-exist had these defects:
-
-| # | Defect | Consequence |
-|---|---|---|
-| 1 | `.cuda()` hardcoded on all tensors | hard crash on any non-NVIDIA machine |
-| 2 | `device` computed then never used | the one correct line was dead code |
-| 3 | `torch` never seeded | network init not reproducible, despite a cell devoted to seeding |
-| 4 | no feature standardization | **iterates diverge to NaN** on real data (demonstrated in E6) |
-| 5 | no intercept, `y` not centred | forces the response mean into penalised coefficients |
-| 6 | Boston fetched over HTTP at runtime | **that URL now returns HTTP 403** — the cell cannot run at all |
-| 7 | labels cast to `float32` | unusable by `cross_entropy`, which needs `int64` |
-| 8 | `idx2numpy` imported, declared nowhere | no dependency manifest existed |
-| 9 | MNIST never normalized | raw uint8 0–255 saturates a ReLU network |
-
-Defect 6 is why this project uses **California housing** rather than Boston: the CMU host now
-refuses the request, and the dataset was removed from scikit-learn in 1.2 because its `B` feature
-encodes a racist assumption about neighbourhood composition. `load_boston()` is retained as an
-explicit error that explains both. `idx2numpy` was dropped entirely — the IDX format is a short
-`numpy.frombuffer` read (`data.read_idx`).
-
-## A known limitation
-
-Plain subgradient descent does **not** produce exact zeros: coefficients approach zero without
-landing on it, so support recovery requires thresholding. Coordinate descent and proximal methods
-(ISTA/FISTA) apply a soft-threshold and do give exact sparsity. Adding a proximal variant is the
-natural extension of this work.
-
-## Regenerating the notebook
-
-`Project.ipynb` can be edited directly in Jupyter. It was scaffolded from
-`tools/build_notebook.py`, which is kept in the repo so the narrative and code cells can be
-regenerated from one reviewable file instead of hand-edited as JSON:
-
-```bash
-uv run python tools/build_notebook.py
-uv run jupyter nbconvert --execute --to notebook --inplace Project.ipynb
-```
+Boston housing was replaced by California housing: the source URL now returns HTTP 403, and the
+dataset was removed from scikit-learn 1.2 because its `B` feature encodes a racist assumption about
+neighbourhood composition. `load_boston()` is retained as an explicit error explaining both.

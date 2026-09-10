@@ -3,5 +3,5 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .ipynb_checkpoints/
-data/boston.npz
+data/*.npz.tmp
 figures/

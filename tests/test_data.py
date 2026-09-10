@@ -90,3 +90,44 @@ def test_synthetic_is_reproducible():
 def test_too_many_nonzeros_rejected():
     with pytest.raises(ValueError):
         make_sparse_regression(d=5, k=10)
+
+
+def test_load_boston_raises_with_explanation():
+    """Defect #6: the CMU host now returns HTTP 403, so the original notebook's
+    data cell cannot execute at all. The replacement must say so explicitly
+    rather than failing with an opaque urllib error."""
+    from aomml.data import load_boston
+
+    with pytest.raises(RuntimeError, match="403"):
+        load_boston()
+
+
+def test_california_housing_loads_from_cache():
+    from aomml.data import load_california_housing
+
+    X, y, names = load_california_housing()
+    assert X.shape[0] == y.shape[0] == 20_640
+    assert X.shape[1] == len(names) == 8
+    assert X.dtype == torch.float64
+    assert torch.isfinite(X).all() and torch.isfinite(y).all()
+
+
+def test_california_subsampling_is_reproducible():
+    from aomml.data import load_california_housing
+
+    a, ya, _ = load_california_housing(n_samples=500, seed=1)
+    b, yb, _ = load_california_housing(n_samples=500, seed=1)
+    c, _, _ = load_california_housing(n_samples=500, seed=2)
+    assert a.shape[0] == 500
+    assert torch.equal(a, b) and torch.equal(ya, yb)
+    assert not torch.equal(a, c)
+
+
+def test_california_features_are_badly_scaled():
+    """The premise of the standardisation experiment: without scaling, one
+    coordinate's gradient dwarfs another's by three orders of magnitude."""
+    from aomml.data import load_california_housing
+
+    X, _, _ = load_california_housing()
+    spread = float(X.std(dim=0).max() / X.std(dim=0).min())
+    assert spread > 100

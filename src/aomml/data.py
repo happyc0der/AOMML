@@ -20,6 +20,7 @@ __all__ = [
     "read_idx",
     "load_mnist",
     "load_boston",
+    "load_california_housing",
     "DATA_DIR",
 ]
 
@@ -164,43 +165,64 @@ def load_mnist(
 
 
 BOSTON_URL = "http://lib.stat.cmu.edu/datasets/boston"
-BOSTON_FEATURES = [
-    "CRIM", "ZN", "INDUS", "CHAS", "NOX", "RM", "AGE",
-    "DIS", "RAD", "TAX", "PTRATIO", "B", "LSTAT",
-]
 
 
-def load_boston(
-    cache: str | Path = DATA_DIR / "boston.npz",
+def load_boston(*_args, **_kwargs):
+    """Deprecated and no longer loadable. Use :func:`load_california_housing`.
+
+    The original notebook fetched Boston housing from lib.stat.cmu.edu at
+    runtime. That host now returns **HTTP 403**, so the original data-loading
+    cell cannot execute at all today -- which is precisely why a networked
+    dataset fetch does not belong in a reproducible project.
+
+    The dataset was also removed from scikit-learn in 1.2 because its ``B``
+    feature encodes a racist assumption about neighbourhood composition.
+    California housing is the canonical replacement for this regression task.
+    """
+    raise RuntimeError(
+        f"Boston housing is unavailable: {BOSTON_URL} returns HTTP 403, and the "
+        "dataset was removed from scikit-learn in 1.2 over its 'B' feature. "
+        "Use load_california_housing() instead."
+    )
+
+
+def load_california_housing(
+    cache: str | Path = DATA_DIR / "california.npz",
     dtype: torch.dtype = torch.float64,
+    n_samples: int | None = None,
+    seed: int = 42,
 ) -> tuple[torch.Tensor, torch.Tensor, list[str]]:
-    """Load Boston housing, caching to disk after the first fetch.
+    """Load California housing, caching to disk so reruns need no network.
 
-    The original notebook re-downloaded this from lib.stat.cmu.edu on every run,
-    which makes the notebook non-reproducible and broken offline.
+    Replaces the original notebook's Boston fetch (see :func:`load_boston`).
+    Features span very different scales -- median income in the single digits
+    against population in the thousands -- so this is a real test of whether
+    standardisation is being applied; without it a single penalty ``lambda``
+    is meaningless across coordinates and the subgradient steps diverge.
 
-    Note: this dataset is deprecated (removed from scikit-learn in 1.2) because
-    its ``B`` feature encodes a racist assumption about neighbourhood
-    composition. It is kept here only because it is what the original project
-    used; ``sklearn.datasets.fetch_california_housing`` is a drop-in replacement
-    for the regression task.
+    ``n_samples`` optionally subsamples for faster experiments.
     """
     cache = Path(cache)
     if cache.exists():
-        blob = np.load(cache)
+        blob = np.load(cache, allow_pickle=True)
         data, target = blob["data"], blob["target"]
+        names = [str(v) for v in blob["names"]]
     else:
-        import pandas as pd
+        from sklearn.datasets import fetch_california_housing
 
-        raw = pd.read_csv(BOSTON_URL, sep=r"\s+", skiprows=22, header=None)
-        # Each record is split across two consecutive rows in the source file.
-        data = np.hstack([raw.values[::2, :], raw.values[1::2, :2]])
-        target = raw.values[1::2, 2]
+        bundle = fetch_california_housing()
+        data, target = bundle.data, bundle.target
+        names = list(bundle.feature_names)
         cache.parent.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(cache, data=data, target=target)
+        np.savez_compressed(cache, data=data, target=target, names=np.array(names))
+
+    if n_samples is not None and n_samples < data.shape[0]:
+        rng = np.random.default_rng(seed)
+        idx = rng.choice(data.shape[0], size=n_samples, replace=False)
+        data, target = data[idx], target[idx]
 
     return (
         torch.from_numpy(np.ascontiguousarray(data)).to(dtype),
         torch.from_numpy(np.ascontiguousarray(target)).to(dtype),
-        list(BOSTON_FEATURES),
+        names,
     )

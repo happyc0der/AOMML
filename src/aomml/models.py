@@ -24,9 +24,7 @@ class LinearModel(nn.Module):
         # precisely the non-smooth case this project is about, so starting there
         # exercises it from step one.
         self.weight = nn.Parameter(torch.zeros(n_features, dtype=dtype))
-        self.bias = (
-            nn.Parameter(torch.zeros((), dtype=dtype)) if fit_intercept else None
-        )
+        self.bias = nn.Parameter(torch.zeros((), dtype=dtype)) if fit_intercept else None
 
     def forward(self, X: torch.Tensor) -> torch.Tensor:
         out = X @ self.weight
@@ -51,7 +49,7 @@ class ReLUMLP(nn.Module):
             raise ValueError(f"need at least an input and output dim, got {dims}")
 
         layers: list[nn.Module] = []
-        for i, (fan_in, fan_out) in enumerate(zip(dims[:-1], dims[1:])):
+        for i, (fan_in, fan_out) in enumerate(zip(dims[:-1], dims[1:], strict=True)):
             layers.append(nn.Linear(fan_in, fan_out, dtype=dtype))
             if i < len(dims) - 2:
                 layers.append(nn.ReLU())

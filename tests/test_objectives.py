@@ -36,9 +36,7 @@ def test_l1_subgradient_valid_at_zero(synth, lam):
 def test_objective_value_matches_definition(synth, lam):
     w = torch.randn(synth.X.shape[1], dtype=torch.float64)
     n = synth.X.shape[0]
-    expected = (
-        0.5 / n * ((synth.X @ w - synth.y) ** 2).sum() + lam * w.abs().sum()
-    )
+    expected = 0.5 / n * ((synth.X @ w - synth.y) ** 2).sum() + lam * w.abs().sum()
     assert torch.isclose(lasso_objective(w, synth.X, synth.y, lam), expected, atol=1e-12)
 
 

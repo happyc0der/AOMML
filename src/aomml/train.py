@@ -48,7 +48,7 @@ class History:
         finding in the constant-step-size experiment.
         """
         series = self.f_best if use_best else self.f
-        for s, value in zip(self.step, series):
+        for s, value in zip(self.step, series, strict=True):
             if value <= target:
                 return s
         return None
@@ -63,11 +63,9 @@ def _grad_norm(model: nn.Module) -> float:
 
 
 @torch.no_grad()
-def _update_running_average(
-    avg: list[torch.Tensor], model: nn.Module, count: int
-) -> None:
+def _update_running_average(avg: list[torch.Tensor], model: nn.Module, count: int) -> None:
     """Polyak averaging: ``avg <- avg + (w - avg) / count``, numerically stable."""
-    for a, p in zip(avg, model.parameters()):
+    for a, p in zip(avg, model.parameters(), strict=True):
         a.add_((p.detach() - a) / count)
 
 
@@ -79,10 +77,10 @@ def _evaluate_at(
 ) -> float:
     """Evaluate ``objective`` at a given parameter vector, then restore the model."""
     saved = [p.detach().clone() for p in model.parameters()]
-    for p, new in zip(model.parameters(), params):
+    for p, new in zip(model.parameters(), params, strict=True):
         p.copy_(new)
     value = float(objective(model))
-    for p, old in zip(model.parameters(), saved):
+    for p, old in zip(model.parameters(), saved, strict=True):
         p.copy_(old)
     return value
 
@@ -125,9 +123,7 @@ def train(
     generator = torch.Generator().manual_seed(seed)
     history = History()
     best = float("inf")
-    avg_params = (
-        [p.detach().clone() for p in model.parameters()] if track_average else []
-    )
+    avg_params = [p.detach().clone() for p in model.parameters()] if track_average else []
 
     step = 0
     n_avg = 0

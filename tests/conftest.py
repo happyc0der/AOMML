@@ -20,6 +20,7 @@ def lam():
 def lasso_loss(lam):
     def loss(model, Xb, yb):
         return lasso_objective(model.weight, Xb, yb, lam, model.bias)
+
     return loss
 
 

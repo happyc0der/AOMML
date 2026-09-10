@@ -9,7 +9,8 @@ network**. Each is studied on synthetic data with known ground truth, then on re
 
 ```bash
 uv sync --group dev
-uv run pytest                 # 55 tests
+uv run pytest                 # 87 tests
+uv run ruff check .           # lint
 uv run jupyter lab Project.ipynb
 ```
 
@@ -29,7 +30,7 @@ src/aomml/
   data.py         synthetic sparse regression, IDX reader, California housing
   models.py       LinearModel, ReLUMLP
   utils.py        seeding, device selection, Standardizer
-tests/            55 tests — see "Verification" below
+tests/            87 tests — see "Verification" below
 Project.ipynb     experimental narrative (E1–E7)
 data/             MNIST IDX files, cached California housing
 ```
@@ -63,12 +64,37 @@ Correctness is asserted against **external references**, not by inspecting loss 
 | Optimizer solves LASSO | reaches scikit-learn's optimum within $10^{-3}$; coefficients within $10^{-2}$ |
 | Support recovery | true support of the synthetic problem fully recovered |
 | Step-size theory | constant step provably stalls (4× budget → no improvement); $1/\sqrt{k}$ keeps descending |
-| Momentum | ~5 orders of magnitude improvement at $\kappa(X)=200$ |
+| Momentum | see the note below — the naive comparison overstates it by 8 orders of magnitude |
 | Network wiring | MLP drives loss to ~0 on 32 samples |
 | Update rules | each recurrence checked step-by-step against hand-computed values |
 
 `tests/test_regressions.py` additionally guards every defect listed below, so a regression
 reintroduces a failing test rather than a silent behaviour change.
+
+### The momentum result, stated carefully
+
+Comparing $\beta$ values at a fixed $\alpha_0$ is not a controlled experiment. The momentum buffer
+accumulates to $v \approx g/(1-\beta)$, so the *effective* step is $\alpha_0/(1-\beta)$ — at
+$\beta = 0.99$ that is a step $100\times$ larger than at $\beta = 0$. Running it both ways on
+$\kappa(X) = 200$:
+
+| | $\beta = 0$ | $\beta = 0.99$ | apparent speedup |
+|---|---|---|---|
+| fixed $\alpha_0 = 1$ | 2.29e-4 | 2.46e-13 | **9.3e8×** |
+| effective step matched to 1 | 2.29e-4 | 2.18e-4 | **1.05×** |
+
+At a matched step, momentum buys essentially nothing per iteration. What it does buy is
+**stability**: plain SSGD diverges above an effective step of 1.5, while $\beta = 0.99$ remains
+stable to an effective step of 300. That is the real mechanism — heavy-ball improves the
+condition-number dependence from $\kappa$ to $\sqrt{\kappa}$ by enabling a larger stable step, not
+by making each step individually smarter. E4 in the notebook runs both arms and the stability sweep.
+
+### Evaluation hygiene
+
+MNIST uses a 54k/6k/10k train/validation/test split; the optimiser is selected on validation
+accuracy and the test set is read once. Splits go through `data.train_test_split`, which shuffles —
+California housing is stored in geographic order, so a slice split shifts mean latitude by ~1.9°
+between halves and silently evaluates on a different population than it trained on.
 
 ## What was wrong with the original notebook
 

@@ -110,9 +110,15 @@ def test_training_is_deterministic():
         seed_everything(0)
         model = LinearModel(20)
         return train(
-            model, loss, data.X, data.y,
+            model,
+            loss,
+            data.X,
+            data.y,
             SSGD(model.parameters(), lr=0.1, schedule="inv_sqrt"),
-            epochs=20, batch_size=16, eval_every=5, seed=3,
+            epochs=20,
+            batch_size=16,
+            eval_every=5,
+            seed=3,
         )
 
     a, b = run(), run()

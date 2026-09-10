@@ -19,7 +19,7 @@ def test_mnist_dtypes_and_ranges():
 
     assert d["X_train"].dtype == torch.float32
     assert d["y_train"].dtype == torch.int64
-    assert 0.0 <= float(d["X_train"].min()) and float(d["X_train"].max()) <= 1.0
+    assert float(d["X_train"].min()) >= 0.0 and float(d["X_train"].max()) <= 1.0
     assert int(d["y_train"].min()) >= 0 and int(d["y_train"].max()) <= 9
 
 
@@ -131,3 +131,73 @@ def test_california_features_are_badly_scaled():
     X, _, _ = load_california_housing()
     spread = float(X.std(dim=0).max() / X.std(dim=0).min())
     assert spread > 100
+
+
+def test_train_test_split_shuffles():
+    """Slicing an ordered dataset evaluates on a different population than it
+    trained on. California housing is stored geographically, so an unshuffled
+    split shifts mean latitude by ~1.9 degrees between halves."""
+    from aomml.data import load_california_housing, train_test_split
+
+    X, y, _ = load_california_housing()
+    lat = 6  # Latitude column
+
+    n = int(0.8 * len(X))
+    slice_shift = abs(float(X[:n, lat].mean() - X[n:, lat].mean()))
+
+    Xtr, Xte, _, _ = train_test_split(X, y, test_size=0.2, seed=42)
+    shuffled_shift = abs(float(Xtr[:, lat].mean() - Xte[:, lat].mean()))
+
+    assert slice_shift > 1.0, "premise: the raw data really is ordered"
+    assert shuffled_shift < 0.1, "shuffled split must not shift the distribution"
+
+
+def test_train_test_split_sizes_and_partition():
+    from aomml.data import train_test_split
+
+    X = torch.arange(100, dtype=torch.float64).reshape(100, 1)
+    y = torch.arange(100, dtype=torch.float64)
+    Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=0.25, seed=0)
+
+    assert Xtr.shape[0] == ytr.shape[0] == 75
+    assert Xte.shape[0] == yte.shape[0] == 25
+    # Every row appears exactly once across the two halves.
+    combined = torch.cat([Xtr.flatten(), Xte.flatten()]).sort().values
+    assert torch.equal(combined, torch.arange(100, dtype=torch.float64))
+
+
+def test_train_test_split_keeps_rows_aligned():
+    """X and y must be permuted together, or every label is wrong."""
+    from aomml.data import train_test_split
+
+    X = torch.arange(60, dtype=torch.float64).reshape(60, 1)
+    y = X.flatten() * 10
+    Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=0.2, seed=1)
+    assert torch.equal(ytr, Xtr.flatten() * 10)
+    assert torch.equal(yte, Xte.flatten() * 10)
+
+
+def test_train_test_split_is_reproducible():
+    from aomml.data import train_test_split
+
+    X = torch.randn(50, 3, dtype=torch.float64)
+    y = torch.randn(50, dtype=torch.float64)
+    a = train_test_split(X, y, seed=7)[0]
+    b = train_test_split(X, y, seed=7)[0]
+    c = train_test_split(X, y, seed=8)[0]
+    assert torch.equal(a, b) and not torch.equal(a, c)
+
+
+@pytest.mark.parametrize("bad", [0.0, 1.0, -0.1, 1.5])
+def test_train_test_split_rejects_invalid_test_size(bad):
+    from aomml.data import train_test_split
+
+    with pytest.raises(ValueError):
+        train_test_split(torch.randn(10, 2), torch.randn(10), test_size=bad)
+
+
+def test_train_test_split_rejects_mismatched_lengths():
+    from aomml.data import train_test_split
+
+    with pytest.raises(ValueError):
+        train_test_split(torch.randn(10, 2), torch.randn(9))

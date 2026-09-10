@@ -127,8 +127,7 @@ class SSGDMomentum(_ScheduledOptimizer):
             raise ValueError("nesterov is only defined for the buffer variant")
         super().__init__(
             params,
-            dict(lr=lr, beta=beta, schedule=schedule, k=0,
-                 nesterov=nesterov, variant=variant),
+            dict(lr=lr, beta=beta, schedule=schedule, k=0, nesterov=nesterov, variant=variant),
         )
 
     @torch.no_grad()

@@ -11,9 +11,14 @@ from aomml.optimizers import SSGD, SSGDMomentum, schedule_factor
 @pytest.mark.parametrize(
     "schedule,k,expected",
     [
-        ("constant", 0, 1.0), ("constant", 99, 1.0),
-        ("inv_sqrt", 0, 1.0), ("inv_sqrt", 1, 1 / math.sqrt(2)), ("inv_sqrt", 99, 0.1),
-        ("inv", 0, 1.0), ("inv", 1, 0.5), ("inv", 99, 0.01),
+        ("constant", 0, 1.0),
+        ("constant", 99, 1.0),
+        ("inv_sqrt", 0, 1.0),
+        ("inv_sqrt", 1, 1 / math.sqrt(2)),
+        ("inv_sqrt", 99, 0.1),
+        ("inv", 0, 1.0),
+        ("inv", 1, 0.5),
+        ("inv", 99, 0.01),
     ],
 )
 def test_lr_schedule_values(schedule, k, expected):
@@ -63,6 +68,7 @@ def test_momentum_recurrence_is_exact():
 def test_momentum_variants_agree_under_constant_step():
     """Buffer and difference forms are algebraically identical when alpha is
     fixed -- telescoping gives w_k - w_{k-1} = -alpha*v_k."""
+
     def run(variant):
         p = torch.nn.Parameter(torch.tensor([3.0], dtype=torch.float64))
         opt = SSGDMomentum([p], lr=0.1, beta=0.9, schedule="constant", variant=variant)
@@ -77,6 +83,7 @@ def test_momentum_variants_agree_under_constant_step():
 def test_momentum_variants_diverge_under_decaying_step():
     """...and are genuinely different once alpha decays, because the buffer form
     rescales the whole accumulated history by the current alpha_k."""
+
     def run(variant):
         p = torch.nn.Parameter(torch.tensor([3.0], dtype=torch.float64))
         opt = SSGDMomentum([p], lr=0.1, beta=0.9, schedule="inv_sqrt", variant=variant)
@@ -119,3 +126,79 @@ def test_zero_beta_reduces_to_plain_ssgd():
         o1.step()
         o2.step()
     assert a.item() == pytest.approx(b.item(), abs=1e-14)
+
+
+def test_nesterov_matches_intended_recurrence():
+    """Nesterov looks one momentum step ahead: d = g + beta*v_{k+1}.
+
+    This path shipped untested; the recurrence is pinned here explicitly.
+    """
+    p = torch.nn.Parameter(torch.zeros(1, dtype=torch.float64))
+    opt = SSGDMomentum([p], lr=0.1, beta=0.9, schedule="constant", nesterov=True)
+    v = w = 0.0
+    for g in (1.0, 1.0, -2.0, 0.5):
+        p.grad = torch.tensor([g], dtype=torch.float64)
+        opt.step()
+        v = 0.9 * v + g
+        w = w - 0.1 * (g + 0.9 * v)
+        assert p.item() == pytest.approx(w, abs=1e-12)
+
+
+def test_nesterov_matches_torch_sgd():
+    ours = torch.nn.Parameter(torch.tensor([3.0], dtype=torch.float64))
+    theirs = torch.nn.Parameter(torch.tensor([3.0], dtype=torch.float64))
+    a = SSGDMomentum([ours], lr=0.05, beta=0.9, schedule="constant", nesterov=True)
+    b = torch.optim.SGD([theirs], lr=0.05, momentum=0.9, nesterov=True)
+    for _ in range(20):
+        ours.grad = 2 * ours.detach()
+        theirs.grad = 2 * theirs.detach()
+        a.step()
+        b.step()
+    assert ours.item() == pytest.approx(theirs.item(), abs=1e-14)
+
+
+def test_nesterov_differs_from_plain_momentum():
+    """Guards against the flag being silently ignored."""
+
+    def run(nesterov):
+        p = torch.nn.Parameter(torch.tensor([3.0], dtype=torch.float64))
+        opt = SSGDMomentum([p], lr=0.05, beta=0.9, schedule="constant", nesterov=nesterov)
+        for _ in range(10):
+            p.grad = 2 * p.detach()
+            opt.step()
+        return p.item()
+
+    assert abs(run(True) - run(False)) > 1e-6
+
+
+def test_nesterov_rejected_for_difference_variant():
+    """Nesterov is only defined for the buffer formulation."""
+    with pytest.raises(ValueError, match="nesterov"):
+        SSGDMomentum([torch.nn.Parameter(torch.zeros(1))], nesterov=True, variant="difference")
+
+
+def test_current_lr_reflects_schedule():
+    """current_lr must report the step the *next* call to step() will use."""
+    p = torch.nn.Parameter(torch.zeros(1, dtype=torch.float64))
+    opt = SSGD([p], lr=0.4, schedule="inv_sqrt")
+
+    assert opt.current_lr() == pytest.approx(0.4)
+    p.grad = torch.zeros(1, dtype=torch.float64)
+    opt.step()
+    assert opt.current_lr() == pytest.approx(0.4 / math.sqrt(2))
+    opt.step()
+    assert opt.current_lr() == pytest.approx(0.4 / math.sqrt(3))
+
+
+def test_current_lr_constant_schedule_is_flat():
+    p = torch.nn.Parameter(torch.zeros(1, dtype=torch.float64))
+    opt = SSGDMomentum([p], lr=0.25, schedule="constant")
+    for _ in range(5):
+        p.grad = torch.zeros(1, dtype=torch.float64)
+        opt.step()
+    assert opt.current_lr() == pytest.approx(0.25)
+
+
+def test_optimizer_rejects_non_positive_lr():
+    with pytest.raises(ValueError):
+        SSGD([torch.nn.Parameter(torch.zeros(1))], lr=0.0)

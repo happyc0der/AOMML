@@ -27,7 +27,9 @@ def seed_everything(seed: int = 42) -> None:
     parameter initialisation stayed random run to run.
     """
     random.seed(seed)
-    np.random.seed(seed)
+    # Legacy global seed on purpose: scikit-learn and other libraries here still
+    # draw from numpy's global RNG, so a Generator would not cover them.
+    np.random.seed(seed)  # noqa: NPY002
     torch.manual_seed(seed)
     if torch.backends.mps.is_available():
         torch.mps.manual_seed(seed)
@@ -77,7 +79,7 @@ class Standardizer:
     def fitted(self) -> bool:
         return self.mean_ is not None
 
-    def fit(self, X: torch.Tensor) -> "Standardizer":
+    def fit(self, X: torch.Tensor) -> Standardizer:
         if X.ndim != 2:
             raise ValueError(f"expected a 2-D design matrix, got shape {tuple(X.shape)}")
         self.mean_ = X.mean(dim=0)
@@ -93,9 +95,7 @@ class Standardizer:
                 "split and reuse those statistics for test data"
             )
         if X.shape[1] != self.mean_.shape[0]:
-            raise ValueError(
-                f"expected {self.mean_.shape[0]} features, got {X.shape[1]}"
-            )
+            raise ValueError(f"expected {self.mean_.shape[0]} features, got {X.shape[1]}")
         return (X - self.mean_) / self.std_
 
     def fit_transform(self, X: torch.Tensor) -> torch.Tensor:

@@ -12,9 +12,23 @@ as JSON.
 import json
 
 C = []
-def md(s): C.append({"cell_type":"markdown","metadata":{},"source":s.strip("\n").split("\n")})
-def co(s): C.append({"cell_type":"code","execution_count":None,"metadata":{},"outputs":[],
-                     "source":s.strip("\n").split("\n")})
+
+
+def md(s):
+    C.append({"cell_type": "markdown", "metadata": {}, "source": s.strip("\n").split("\n")})
+
+
+def co(s):
+    C.append(
+        {
+            "cell_type": "code",
+            "execution_count": None,
+            "metadata": {},
+            "outputs": [],
+            "source": s.strip("\n").split("\n"),
+        }
+    )
+
 
 md(r"""
 # Stochastic Subgradient Descent, with and without Momentum
@@ -64,7 +78,8 @@ import numpy as np
 import torch
 from sklearn.linear_model import Lasso
 
-from aomml.data import load_california_housing, load_mnist, make_sparse_regression
+from aomml.data import (load_california_housing, load_mnist, make_sparse_regression,
+                        train_test_split)
 from aomml.models import LinearModel, ReLUMLP
 from aomml.objectives import analytic_lasso_subgradient, is_valid_subgradient, lasso_objective
 from aomml.optimizers import SSGD, SSGDMomentum
@@ -281,6 +296,14 @@ would be the wrong lesson to take from this single plot.
 Heavy-ball momentum earns its keep on **ill-conditioned** problems, where plain gradient steps
 zig-zag across a narrow valley. We use the synthetic generator's `condition_number` control to
 build a problem with $\kappa(X) = 200$ and compare $\beta \in \{0, 0.5, 0.9, 0.99\}$.
+
+**A confound to control for first.** Comparing $\beta$ values at a fixed $\alpha_0$ is not a clean
+experiment. At steady state the buffer accumulates to $v \approx g/(1-\beta)$, so the *effective*
+step is $\alpha_0/(1-\beta)$ — meaning $\beta = 0.99$ silently takes steps $100\times$ larger than
+$\beta = 0$. Any advantage it shows might be nothing more than a bigger step.
+
+So we run it both ways: at fixed $\alpha_0$ (left) and with the **effective step held constant** at
+$\alpha_0/(1-\beta) = 1$ (right).
 """)
 
 co(r"""
@@ -288,41 +311,105 @@ ill = make_sparse_regression(n=300, d=30, k=30, noise_std=0.0, condition_number=
 smooth_loss = lambda m, Xb, yb: lasso_objective(m.weight, Xb, yb, 0.0, m.bias)
 print(f"condition number of X: {torch.linalg.cond(ill.X):.1f}")
 
-plt.figure(figsize=(11, 4))
-ax = plt.subplot(1, 2, 1)
-finals = {}
-for i, beta in enumerate([0.0, 0.5, 0.9, 0.99]):
+def run_beta(beta, lr, epochs=3000):
     m = LinearModel(30)
-    opt = (SSGD(m.parameters(), lr=1.0, schedule="constant") if beta == 0
-           else SSGDMomentum(m.parameters(), lr=1.0, beta=beta, schedule="constant"))
-    hh = train(m, smooth_loss, ill.X, ill.y, opt, epochs=3000, batch_size=300, eval_every=25, seed=0)
-    finals[beta] = hh.final_best
-    ax.semilogy(hh.step, hh.f_best, label=rf"$\beta = {beta}$", color=f"C{i}", lw=1.6)
-    print(f"beta = {beta:<5} final f_best = {hh.final_best:.3e}")
-print(f"\nmomentum (beta=0.99) is {finals[0.0] / finals[0.99]:.3g}x closer to the optimum than plain SSGD")
-ax.set(xlabel="iteration $k$", ylabel=r"$f(w_k^{best})$", title=r"E4: momentum on $\kappa(X)=200$")
-ax.legend()
+    opt = (SSGD(m.parameters(), lr=lr, schedule="constant") if beta == 0
+           else SSGDMomentum(m.parameters(), lr=lr, beta=beta, schedule="constant"))
+    return train(m, smooth_loss, ill.X, ill.y, opt, epochs=epochs,
+                 batch_size=300, eval_every=25, seed=0)
 
-# The two momentum formulations: identical at constant step, different when alpha decays.
-ax2 = plt.subplot(1, 2, 2)
+betas = [0.0, 0.5, 0.9, 0.99]
+fig, (ax1, ax2) = plt.subplots(1, 2)
+same, matched = {}, {}
+
+print(f"\n{'beta':<6} {'same alpha_0 = 1.0':>20} {'effective step = 1.0':>22}")
+print("-" * 50)
+for i, beta in enumerate(betas):
+    h_same = run_beta(beta, 1.0)                 # effective step = 1/(1-beta)
+    h_match = run_beta(beta, 1.0 - beta if beta > 0 else 1.0)   # effective step = 1.0
+    same[beta], matched[beta] = h_same.final_best, h_match.final_best
+    ax1.semilogy(h_same.step, h_same.f_best, color=f"C{i}", lw=1.6, label=rf"$\beta = {beta}$")
+    ax2.semilogy(h_match.step, h_match.f_best, color=f"C{i}", lw=1.6, label=rf"$\beta = {beta}$")
+    print(f"{beta:<6} {h_same.final_best:>20.3e} {h_match.final_best:>22.3e}")
+
+print(f"\nspeedup at fixed alpha_0      : {same[0.0] / same[0.99]:>10.3g}x")
+print(f"speedup at matched step size : {matched[0.0] / matched[0.99]:>10.3g}x   <-- the honest number")
+
+ax1.set(xlabel="iteration $k$", ylabel=r"$f(w_k^{best})$",
+        title=r"E4a: fixed $\alpha_0=1$ (effective step $=1/(1-\beta)$)")
+ax2.set(xlabel="iteration $k$", ylabel=r"$f(w_k^{best})$",
+        title=r"E4b: effective step held at $1.0$")
+ax1.legend(); ax2.legend()
+plt.tight_layout(); plt.show()
+plt.tight_layout(); plt.show()
+""")
+
+md(r"""
+**The advantage disappears once the step size is matched.** At $\alpha_0/(1-\beta) = 1$ every value
+of $\beta$ lands in the same place. So momentum is *not* intrinsically better per iteration here —
+the dramatic left-hand gap was, to a first approximation, the larger effective step.
+
+That is not the end of the story, though, and the next cell is the point of the whole experiment:
+**plain subgradient descent cannot simply take the bigger step.** Above a threshold it diverges,
+while momentum remains stable at effective steps far beyond it.
+""")
+
+co(r"""
+# What is the largest step each method can survive?
+with torch.no_grad():
+    f_at_zero = float(smooth_loss(LinearModel(30), ill.X, ill.y))
+grid = [0.5, 1.0, 1.5, 2.0, 3.0, 5.0, 10.0, 30.0, 100.0]
+
+print(f"objective at w = 0: {f_at_zero:.3f}   (a run is 'diverged' if it never improves on this)\n")
+print(f"{'beta':<6} {'largest stable alpha_0':>24} {'-> effective step':>20}")
+print("-" * 54)
+for beta in [0.0, 0.5, 0.9, 0.99]:
+    stable = []
+    for lr in grid:
+        v = run_beta(beta, lr, epochs=300).final_best
+        if np.isfinite(v) and v < f_at_zero:
+            stable.append(lr)
+    if stable:
+        top = max(stable)
+        print(f"{beta:<6} {top:>24.1f} {top / (1 - beta):>20.1f}")
+    else:
+        print(f"{beta:<6} {'none in grid':>24} {'-':>20}")
+""")
+
+md(r"""
+This is the real mechanism. Plain SSGD is capped by the curvature of the worst-conditioned
+direction: exceed that step and it oscillates and diverges. Momentum damps exactly those
+oscillations, so it stays stable at effective steps an order of magnitude larger, and it is *that*
+which buys the orders-of-magnitude improvement — not a better per-iteration update at equal step.
+
+It is also the honest form of the classical result. Heavy-ball improves the condition-number
+dependence of the convergence rate from $\kappa$ to $\sqrt{\kappa}$, and it does so by enabling a
+larger stable step, not by making each step individually smarter.
+
+---
+## 5b. The two momentum formulations
+""")
+
+co(r"""
+plt.figure(figsize=(7, 4))
+ax = plt.gca()
 for sched, ls in [("constant", "-"), ("inv_sqrt", "--")]:
     for variant, c in [("buffer", "C0"), ("difference", "C3")]:
         m = LinearModel(30)
         hh = train(m, smooth_loss, ill.X, ill.y,
                    SSGDMomentum(m.parameters(), lr=1.0, beta=0.9, schedule=sched, variant=variant),
                    epochs=1500, batch_size=300, eval_every=25, seed=0)
-        ax2.semilogy(hh.step, hh.f_best, ls, color=c, lw=1.5, label=f"{variant}, {sched}")
-ax2.set(xlabel="iteration $k$", ylabel=r"$f(w_k^{best})$",
-        title="E4: buffer vs difference form")
-ax2.legend(fontsize=7)
+        ax.semilogy(hh.step, hh.f_best, ls, color=c, lw=1.5, label=f"{variant}, {sched}")
+ax.set(xlabel="iteration $k$", ylabel=r"$f(w_k^{best})$", title="buffer vs difference form")
+ax.legend(fontsize=8)
 plt.tight_layout(); plt.show()
 """)
 
 md(r"""
-The right-hand panel shows a subtlety worth stating precisely. The **buffer** form
-$v \leftarrow \beta v + g,\; w \leftarrow w - \alpha_k v$ and Polyak's **difference** form
-$w \leftarrow w - \alpha_k g + \beta(w_k - w_{k-1})$ are *algebraically identical* when $\alpha$ is
-constant — telescoping gives $w_k - w_{k-1} = -\alpha v_k$, so the two solid curves coincide.
+The **buffer** form $v \leftarrow \beta v + g,\; w \leftarrow w - \alpha_k v$ and Polyak's
+**difference** form $w \leftarrow w - \alpha_k g + \beta(w_k - w_{k-1})$ are *algebraically
+identical* when $\alpha$ is constant — telescoping gives $w_k - w_{k-1} = -\alpha v_k$, so the two
+solid curves coincide exactly.
 
 Once $\alpha_k$ decays they separate (dashed), because the buffer form rescales the entire
 accumulated history by the *current* $\alpha_k$, while the difference form leaves the previous
@@ -400,8 +487,11 @@ The original notebook loaded Boston housing over HTTP and never scaled the featu
 
 co(r"""
 Xc, yc, names = load_california_housing(n_samples=4000)
-n_tr = int(0.8 * len(Xc))
-Xtr_raw, Xte_raw, ytr, yte = Xc[:n_tr], Xc[n_tr:], yc[:n_tr], yc[n_tr:]
+# Shuffled split: California housing is stored in geographic order, so slicing it
+# would train on one region and test on another (mean latitude shifts by ~1.9 degrees).
+Xtr_raw, Xte_raw, ytr, yte = train_test_split(Xc, yc, test_size=0.2, seed=42)
+print(f"split: {len(Xtr_raw)} train / {len(Xte_raw)} test   "
+      f"(mean latitude {Xtr_raw[:, 6].mean():.2f} vs {Xte_raw[:, 6].mean():.2f})")
 
 print("feature standard deviations (raw):")
 for nm, s in zip(names, Xtr_raw.std(0)):
@@ -446,17 +536,22 @@ $784 \to 128 \to 10$ network with both optimisers.
 co(r"""
 device = get_device(dtype=torch.float32)
 mnist = load_mnist()
-Xtr_m, ytr_m = mnist["X_train"].to(device), mnist["y_train"].to(device)
+
+# Hold out a validation split from the training set. The test set is read exactly
+# once, at the end -- using it to compare optimisers would make the reported
+# number an optimistic estimate of generalisation rather than an honest one.
+X_all, y_all = mnist["X_train"].to(device), mnist["y_train"].to(device)
+Xtr_m, Xval_m, ytr_m, yval_m = train_test_split(X_all, y_all, test_size=0.1, seed=42)
 Xte_m, yte_m = mnist["X_test"].to(device), mnist["y_test"].to(device)
-print(f"MNIST on {device}: train {tuple(Xtr_m.shape)}, test {tuple(Xte_m.shape)}, "
-      f"pixels in [{Xtr_m.min():.0f}, {Xtr_m.max():.0f}], labels {ytr_m.dtype}")
+print(f"MNIST on {device}: {len(Xtr_m)} train / {len(Xval_m)} val / {len(Xte_m)} test")
+print(f"pixels in [{Xtr_m.min():.0f}, {Xtr_m.max():.0f}], labels {ytr_m.dtype}")
 
 ce = lambda m, A, B: torch.nn.functional.cross_entropy(m(A), B)
 probe = lambda mm: ce(mm, Xtr_m[:10_000], ytr_m[:10_000])
 
 plt.figure(figsize=(11, 4))
 ax = plt.subplot(1, 2, 1)
-results = {}
+results, nets = {}, {}
 for i, (label, make_opt) in enumerate([
     ("SSGD",            lambda p: SSGD(p, lr=0.5, schedule="inv_sqrt")),
     ("SSGD + momentum", lambda p: SSGDMomentum(p, lr=0.1, beta=0.9, schedule="inv_sqrt")),
@@ -465,7 +560,10 @@ for i, (label, make_opt) in enumerate([
     net = ReLUMLP((784, 128, 10)).to(device)
     hh = train(net, ce, Xtr_m, ytr_m, make_opt(net.parameters()), epochs=5, batch_size=128,
                full_objective=probe, eval_every=100, seed=0)
-    results[label] = (evaluate_accuracy(net, Xtr_m, ytr_m), evaluate_accuracy(net, Xte_m, yte_m))
+    results[label] = (evaluate_accuracy(net, Xtr_m, ytr_m),
+                      evaluate_accuracy(net, Xval_m, yval_m),
+                      evaluate_accuracy(net, Xte_m, yte_m))
+    nets[label] = net
     ax.plot(hh.step, hh.f, color=f"C{i}", alpha=0.35, lw=0.7)
     ax.plot(hh.step, hh.f_best, color=f"C{i}", lw=1.8, label=label)
 ax.set(xlabel="iteration $k$", ylabel="cross-entropy", title="E7: MNIST training (faint = raw iterate)")
@@ -474,13 +572,19 @@ ax.legend()
 ax2 = plt.subplot(1, 2, 2)
 labels = list(results)
 x = np.arange(len(labels))
-ax2.bar(x - 0.18, [results[l][0] for l in labels], 0.36, label="train")
-ax2.bar(x + 0.18, [results[l][1] for l in labels], 0.36, label="test")
+for j, (split, off) in enumerate([("train", -0.25), ("val", 0.0), ("test", 0.25)]):
+    ax2.bar(x + off, [results[l][j] for l in labels], 0.24, label=split)
 ax2.set(xticks=x, ylim=(0.85, 1.0), ylabel="accuracy", title="E7: MNIST accuracy after 5 epochs")
 ax2.set_xticklabels(labels, fontsize=8)
-ax2.legend()
+ax2.legend(fontsize=8)
+
+print(f"\n{'optimiser':<16} {'train':>8} {'val':>8} {'test':>8}")
+print("-" * 42)
 for l in labels:
-    print(f"{l:<16} train {results[l][0]:.4f}   test {results[l][1]:.4f}")
+    print(f"{l:<16} {results[l][0]:>8.4f} {results[l][1]:>8.4f} {results[l][2]:>8.4f}")
+best = max(labels, key=lambda l: results[l][1])
+print(f"\nselected on validation accuracy: {best}  "
+      f"(val {results[best][1]:.4f} -> test {results[best][2]:.4f})")
 plt.tight_layout(); plt.show()
 """)
 
@@ -501,9 +605,11 @@ md(r"""
    changed its optimality gap by less than $10^{-6}$ relative, while both decaying schedules
    improved by 4–18x over the same interval and ended four orders of magnitude closer to
    $f^\star$. Which decay rate wins is problem-dependent (see §4).
-4. **Momentum pays off under ill-conditioning**, improving $\kappa(X)=200$ by several orders of
-   magnitude, and on MNIST reaching higher accuracy in the same number of epochs. On
-   well-conditioned problems its advantage is modest.
+4. **Momentum's benefit is a stability effect, not a per-step one.** At a *matched* effective step
+   size every $\beta$ performs identically on $\kappa(X)=200$; the orders-of-magnitude gap appears
+   only because plain SSGD diverges above a step that momentum tolerates comfortably. Comparing
+   $\beta$ values at fixed $\alpha_0$ — the obvious experiment — measures the step size, not the
+   momentum, and would have overstated the result by eight orders of magnitude.
 5. **Subgradient descent does not produce exact sparsity.** Coefficients approach zero without
    reaching it, so support recovery needs thresholding. Proximal methods (ISTA/FISTA) are the
    right tool when exact zeros matter — a natural extension of this project.
@@ -521,18 +627,27 @@ uv run jupyter nbconvert --execute --to notebook --inplace Project.ipynb
 ```
 """)
 
-nb = {"cells": C,
-      "metadata": {"kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
-                   "language_info": {"name": "python", "version": "3.12.14",
-                                     "mimetype": "text/x-python", "file_extension": ".py",
-                                     "pygments_lexer": "ipython3",
-                                     "codemirror_mode": {"name": "ipython", "version": 3},
-                                     "nbconvert_exporter": "python"}},
-      "nbformat": 4, "nbformat_minor": 5}
+nb = {
+    "cells": C,
+    "metadata": {
+        "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
+        "language_info": {
+            "name": "python",
+            "version": "3.12.14",
+            "mimetype": "text/x-python",
+            "file_extension": ".py",
+            "pygments_lexer": "ipython3",
+            "codemirror_mode": {"name": "ipython", "version": 3},
+            "nbconvert_exporter": "python",
+        },
+    },
+    "nbformat": 4,
+    "nbformat_minor": 5,
+}
 
 for c in nb["cells"]:
-    c["source"] = [l + "\n" for l in c["source"][:-1]] + [c["source"][-1]]
+    c["source"] = [line + "\n" for line in c["source"][:-1]] + [c["source"][-1]]
 
 with open("Project.ipynb", "w") as f:
     json.dump(nb, f, indent=1)
-print(f"wrote Project.ipynb: {len(C)} cells ({sum(1 for c in C if c['cell_type']=='code')} code)")
+print(f"wrote Project.ipynb: {len(C)} cells ({sum(1 for c in C if c['cell_type'] == 'code')} code)")

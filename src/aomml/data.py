@@ -17,6 +17,7 @@ import torch
 __all__ = [
     "SparseRegressionData",
     "make_sparse_regression",
+    "train_test_split",
     "read_idx",
     "load_mnist",
     "load_boston",
@@ -79,21 +80,47 @@ def make_sparse_regression(
         # Reshape the spectrum without disturbing the singular vectors.
         U, _, Vh = torch.linalg.svd(X, full_matrices=False)
         r = min(n, d)
-        s = torch.logspace(
-            0, -np.log10(condition_number), r, dtype=dtype
-        ) * np.sqrt(n)
+        s = torch.logspace(0, -np.log10(condition_number), r, dtype=dtype) * np.sqrt(n)
         X = U @ torch.diag(s) @ Vh
 
     w_true = torch.zeros(d, dtype=dtype)
     idx = torch.randperm(d, generator=gen)[:k]
     # Keep magnitudes away from zero so the true support is unambiguous.
-    signs = torch.where(
-        torch.rand(k, generator=gen, dtype=dtype) < 0.5, -1.0, 1.0
-    ).to(dtype)
+    signs = torch.where(torch.rand(k, generator=gen, dtype=dtype) < 0.5, -1.0, 1.0).to(dtype)
     w_true[idx] = signs * (1.0 + torch.rand(k, generator=gen, dtype=dtype))
 
     y = X @ w_true + noise_std * torch.randn(n, generator=gen, dtype=dtype)
     return SparseRegressionData(X=X, y=y, w_true=w_true)
+
+
+def train_test_split(
+    X: torch.Tensor,
+    y: torch.Tensor,
+    test_size: float = 0.2,
+    seed: int = 42,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Shuffled train/test split, returning ``(X_train, X_test, y_train, y_test)``.
+
+    Slicing a dataset directly (``X[:n]`` / ``X[n:]``) is a trap whenever the rows
+    carry any order. California housing is stored in geographic order, so a slice
+    split shifts mean latitude from 35.25 to 37.14 between the two halves and
+    quietly evaluates on a different population than it trained on. Shuffling
+    with an explicit seed removes that failure mode without giving up
+    reproducibility.
+    """
+    if X.shape[0] != y.shape[0]:
+        raise ValueError(f"X has {X.shape[0]} rows but y has {y.shape[0]}")
+    if not 0.0 < test_size < 1.0:
+        raise ValueError(f"test_size must be in (0, 1), got {test_size}")
+
+    n = X.shape[0]
+    n_test = int(round(test_size * n))
+    if n_test == 0 or n_test == n:
+        raise ValueError(f"test_size={test_size} leaves an empty split for n={n}")
+
+    perm = torch.randperm(n, generator=torch.Generator().manual_seed(seed))
+    test_idx, train_idx = perm[:n_test], perm[n_test:]
+    return X[train_idx], X[test_idx], y[train_idx], y[test_idx]
 
 
 def read_idx(path: str | Path) -> np.ndarray:
@@ -124,8 +151,7 @@ def read_idx(path: str | Path) -> np.ndarray:
     expected = int(np.prod(shape)) if shape else 1
     if array.size != expected:
         raise ValueError(
-            f"{path.name}: expected {expected} elements for shape {shape}, "
-            f"found {array.size}"
+            f"{path.name}: expected {expected} elements for shape {shape}, found {array.size}"
         )
     # Cast away the big-endian byte order so downstream torch conversion works.
     return array.reshape(shape).astype(dtype.newbyteorder("="))
